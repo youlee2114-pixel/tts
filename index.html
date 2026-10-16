@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>음성 → 텍스트 + 영어 번역 + 읽어주기 (마이크 상시 유지)</title>
+<title>음성 → 텍스트 + 영어 번역 + 읽어주기</title>
 <style>
   * { box-sizing: border-box; }
   body {
@@ -20,8 +20,8 @@
   #start { background: #2563eb; color: #fff; }
   #grantBtn { background: #7c3aed; color: #fff; padding: 8px 14px; font-size: 13px; }
   #speakAll { background: #059669; color: #fff; padding: 8px 14px; font-size: 13px; }
-  #stopSpeak, #stop, #clear, #copySrc, #copyEn, #releaseBtn { background: #e5e7eb; color: #374151; }
-  #stopSpeak, #releaseBtn { padding: 8px 14px; font-size: 13px; }
+  #stopSpeak, #stop, #clear, #copySrc, #copyEn, #releaseBtn, #diagBtn { background: #e5e7eb; color: #374151; }
+  #stopSpeak, #releaseBtn, #diagBtn { padding: 8px 14px; font-size: 13px; }
   button:disabled { opacity: .45; cursor: not-allowed; }
   select { padding: 9px; border: 1px solid #d1d5db; border-radius: 8px; font-size: 14px; max-width: 230px; }
   label.chk { font-size: 13px; display: flex; align-items: center; gap: 4px; }
@@ -30,7 +30,6 @@
   #status { font-size: 13px; color: #6b7280; margin-bottom: 10px; }
   #status.rec { color: #dc2626; font-weight: 600; }
 
-  /* 마이크 권한 바 */
   .micbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
             padding: 10px 12px; border-radius: 8px; margin-bottom: 12px;
             background: #f1f5f9; border: 1px solid #e2e8f0; font-size: 13px; }
@@ -43,6 +42,12 @@
   @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.35} }
   .meter { width: 90px; height: 7px; background: #e2e8f0; border-radius: 4px; overflow: hidden; }
   .meter i { display: block; height: 100%; width: 0%; background: #10b981; transition: width .08s linear; }
+
+  #diag { display: none; margin-bottom: 12px; padding: 12px; background: #0f172a; color: #cbd5e1;
+          border-radius: 8px; font-family: ui-monospace, Menlo, Consolas, monospace;
+          font-size: 12px; line-height: 1.7; white-space: pre-wrap; }
+  #diag b { color: #f8fafc; }
+  .ok { color: #4ade80; } .bad { color: #f87171; } .warn { color: #fbbf24; }
 
   .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
   @media (max-width: 760px) { .cols { grid-template-columns: 1fr; } }
@@ -66,7 +71,6 @@
   <div id="errBox" class="err"></div>
 
   <div class="panel">
-    <!-- 마이크 권한 상태 바 -->
     <div id="micbar" class="micbar">
       <span class="dot"></span>
       <b>마이크</b>
@@ -75,8 +79,14 @@
       <label class="chk"><input type="checkbox" id="keepAlive" checked> 상시 유지</label>
       <button id="grantBtn">권한 요청 / 연결</button>
       <button id="releaseBtn">연결 해제</button>
-      <select id="deviceSel" title="입력 장치"><option>기본 장치</option></select>
+      <button id="diagBtn">진단</button>
+      <!-- value="default" 필수: 없으면 "기본 장치" 문자열이 deviceId로 들어가 OverconstrainedError 발생 -->
+      <select id="deviceSel" title="입력 장치" disabled>
+        <option value="default">기본 장치</option>
+      </select>
     </div>
+
+    <div id="diag"></div>
 
     <div class="row">
       <button id="start">● 녹음 시작</button>
@@ -119,17 +129,21 @@
     </div>
 
     <div class="note">
-      · <b>마이크 상시 유지</b>: <code>getUserMedia</code> 스트림을 한 번 열어 닫지 않고 붙잡아 둡니다 → 인식기를 재시작해도 권한 팝업이 다시 뜨지 않습니다.<br>
-      · 크롬에서 영구 허용하려면 주소창 자물쇠 → 마이크 → <b>허용</b>으로 고정하세요. <code>https://</code> 또는 <code>localhost</code> 필수.
+      · 반드시 <code>.html</code> 파일로 저장해 <b>브라우저 탭에서 직접</b> 여세요. iframe 미리보기에서는 마이크가 차단됩니다.<br>
+      · <code>https://</code> 또는 <code>http://localhost</code> 필요 — <code>python3 -m http.server 8000</code> 추천.<br>
+      · 문제가 생기면 <b>[진단]</b> 버튼으로 환경을 점검하세요.
     </div>
   </div>
 </div>
 
 <script>
 (function () {
+  'use strict';
+
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
   const synth = window.speechSynthesis;
   const $ = id => document.getElementById(id);
+
   const startBtn=$('start'), stopBtn=$('stop'), clearBtn=$('clear'),
         langSel=$('lang'), contChk=$('continuous'), transChk=$('doTrans'),
         autoSpeakChk=$('autoSpeak'), voiceSel=$('voiceSel'),
@@ -140,99 +154,127 @@
         engineBadge=$('engine'), errBox=$('errBox'),
         micbar=$('micbar'), micState=$('micState'), meterBar=$('meterBar'),
         keepAliveChk=$('keepAlive'), grantBtn=$('grantBtn'), releaseBtn=$('releaseBtn'),
-        deviceSel=$('deviceSel');
+        diagBtn=$('diagBtn'), diagBox=$('diag'), deviceSel=$('deviceSel');
+
+  /* ═══════════ 0. 환경 사전 점검 ═══════════ */
+  const inIframe = (() => { try { return window.self !== window.top; } catch { return true; } })();
+
+  function showErr(msg) { errBox.style.display = 'block'; errBox.innerHTML = msg; }
 
   if (!SR) {
-    errBox.style.display='block';
-    errBox.textContent='이 브라우저는 Web Speech API를 지원하지 않습니다. 데스크톱 Chrome 또는 Edge에서 열어 주세요.';
+    showErr('이 브라우저는 <b>Web Speech API</b>를 지원하지 않습니다. 데스크톱 Chrome 또는 Edge를 사용하세요.');
     startBtn.disabled = true;
   }
-  if (!window.isSecureContext) {
-    errBox.style.display='block';
-    errBox.textContent='보안 컨텍스트가 아닙니다. 마이크 권한을 유지하려면 https:// 또는 http://localhost 로 접속하세요.';
+  if (!window.isSecureContext || !navigator.mediaDevices) {
+    showErr('<b>보안 컨텍스트가 아닙니다.</b> file:// 로 열면 마이크를 쓸 수 없습니다. ' +
+            '터미널에서 <code>python3 -m http.server 8000</code> 실행 후 ' +
+            '<code>http://localhost:8000</code> 으로 접속하세요.');
+  } else if (inIframe) {
+    showErr('<b>iframe 안에서 실행 중입니다.</b> 부모 페이지에 <code>allow="microphone"</code> 이 없으면 ' +
+            '권한 팝업이 뜨지 않습니다. HTML을 저장해 브라우저 탭에서 직접 열어 주세요.');
   }
 
-  /* ═══════════ 1. 마이크 상시 유지 (핵심) ═══════════ */
-  let micStream = null;         // 닫지 않고 계속 보유하는 스트림
+  /* ═══════════ 1. 마이크: 단계적 폴백 획득 ═══════════ */
+  let micStream = null;
   let audioCtx = null, analyser = null, meterRAF = null;
-  let permState = 'unknown';
+  let devicesLoaded = false;
 
   function setMicUI(state, text) {
     micbar.className = 'micbar ' + state;
     micState.textContent = text;
     releaseBtn.disabled = !micStream;
     grantBtn.disabled = !!micStream;
+    deviceSel.disabled = !devicesLoaded;
   }
 
-  /* 권한 상태를 Permissions API로 구독 (크롬/엣지) */
-  async function watchPermission() {
-    if (!navigator.permissions) return;
-    try {
-      const p = await navigator.permissions.query({ name: 'microphone' });
-      permState = p.state;
-      applyPerm(p.state);
-      p.onchange = () => { permState = p.state; applyPerm(p.state); };
-    } catch (_) {}
-  }
-  function applyPerm(state) {
-    if (state === 'granted') {
-      if (!micStream && keepAliveChk.checked) acquireMic();   // 재방문 시 자동 재연결(팝업 없음)
-      else if (micStream) setMicUI('on', '연결됨 · 상시 유지 중');
-      else setMicUI('', '허용됨 (미연결)');
-    } else if (state === 'denied') {
-      setMicUI('deny', '차단됨 — 주소창 자물쇠에서 허용으로 변경하세요');
-    } else {
-      setMicUI('off', '권한 필요 — [권한 요청] 클릭');
-    }
+  /* deviceId 유효성 — 실제 deviceId는 긴 해시 문자열 */
+  function selectedDeviceId() {
+    const v = deviceSel.value;
+    if (!v || v === 'default' || v.length < 10) return null;
+    return v;
   }
 
-  /* 스트림 획득 후 절대 stop() 하지 않음 */
+  /*
+   * 제약 조건을 3단계로 완화하며 시도한다.
+   *  1) 지정 장치 + 오디오 처리 옵션
+   *  2) 기본 장치 + 오디오 처리 옵션
+   *  3) { audio: true }  ← 거의 항상 성공
+   */
+  function buildConstraintLadder() {
+    const proc = { echoCancellation: true, noiseSuppression: true, autoGainControl: true };
+    const id = selectedDeviceId();
+    const ladder = [];
+    if (id) ladder.push({ audio: Object.assign({ deviceId: { exact: id } }, proc) });
+    ladder.push({ audio: proc });
+    ladder.push({ audio: true });
+    return ladder;
+  }
+
   async function acquireMic() {
     if (micStream) return micStream;
-    try {
-      setMicUI('off', '연결 중…');
-      const deviceId = deviceSel.value && deviceSel.value !== 'default' ? { exact: deviceSel.value } : undefined;
-      micStream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          deviceId,
-          echoCancellation: true,   // TTS 에코 억제
-          noiseSuppression: true,
-          autoGainControl: true
-        }
-      });
-
-      // 트랙이 외부 요인(장치 분리 등)으로 끊기면 자동 재획득
-      micStream.getAudioTracks().forEach(t => {
-        t.onended = () => {
-          micStream = null;
-          setMicUI('off', '트랙 종료됨 — 재연결 시도 중…');
-          if (keepAliveChk.checked) setTimeout(acquireMic, 800);
-        };
-      });
-
-      startMeter(micStream);
-      await listDevices();
-      setMicUI('on', '연결됨 · 상시 유지 중');
-      return micStream;
-    } catch (err) {
-      micStream = null;
-      const m = err.name === 'NotAllowedError' ? '권한 거부됨 — 자물쇠 아이콘에서 허용으로 변경'
-              : err.name === 'NotFoundError'  ? '마이크 장치를 찾을 수 없음'
-              : '연결 실패: ' + err.name;
-      setMicUI('deny', m);
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setMicUI('deny', 'getUserMedia 미지원 — https 또는 localhost 로 접속하세요');
       return null;
     }
+
+    setMicUI('off', '연결 중…');
+    const ladder = buildConstraintLadder();
+    let lastErr = null;
+
+    for (let i = 0; i < ladder.length; i++) {
+      try {
+        micStream = await navigator.mediaDevices.getUserMedia(ladder[i]);
+        if (i > 0) deviceSel.value = 'default';   // 폴백됐으면 선택 초기화
+        break;
+      } catch (err) {
+        lastErr = err;
+        // 권한 거부·장치 없음은 조건을 완화해도 소용없으므로 즉시 중단
+        if (err.name === 'NotAllowedError' || err.name === 'SecurityError' || err.name === 'NotFoundError') break;
+        // OverconstrainedError / NotReadableError / TypeError → 다음 단계로 완화 재시도
+      }
+    }
+
+    if (!micStream) { reportMicError(lastErr); return null; }
+
+    micStream.getAudioTracks().forEach(t => {
+      t.onended = () => {
+        micStream = null;
+        setMicUI('off', '트랙 종료됨 — 재연결 시도 중…');
+        if (keepAliveChk.checked) setTimeout(acquireMic, 800);
+      };
+    });
+
+    startMeter(micStream);
+    await listDevices();                 // 권한 획득 후에야 label/deviceId가 채워짐
+    const label = micStream.getAudioTracks()[0]?.label || '기본 장치';
+    setMicUI('on', '연결됨 · ' + label.slice(0, 28));
+    return micStream;
+  }
+
+  function reportMicError(err) {
+    if (!err) { setMicUI('deny', '알 수 없는 오류'); return; }
+    const map = {
+      NotAllowedError: inIframe
+        ? '권한 차단 — iframe 제약이거나 사이트가 차단 상태입니다. 탭에서 직접 열고 자물쇠 아이콘 → 마이크 → 허용'
+        : '권한 거부됨 — 주소창 자물쇠 아이콘 → 마이크 → "허용"으로 변경 후 새로고침',
+      SecurityError:      '보안 정책 차단 — https:// 또는 localhost 로 접속하세요',
+      NotFoundError:      '마이크 장치를 찾을 수 없습니다 (연결 상태 확인)',
+      NotReadableError:   '다른 앱이 마이크를 점유 중입니다 (Zoom/Teams 등 종료 후 재시도)',
+      OverconstrainedError: '장치 조건 불일치 — 기본 장치로 재시도하세요',
+      AbortError:         '요청이 중단되었습니다. 다시 시도하세요'
+    };
+    setMicUI('deny', map[err.name] || ('연결 실패: ' + err.name));
+    console.error('[mic]', err);
   }
 
   function releaseMic() {
-    if (meterRAF) cancelAnimationFrame(meterRAF), meterRAF = null;
+    if (meterRAF) { cancelAnimationFrame(meterRAF); meterRAF = null; }
     if (micStream) micStream.getTracks().forEach(t => { t.onended = null; t.stop(); });
     micStream = null;
     meterBar.style.width = '0%';
     setMicUI('off', '연결 해제됨');
   }
 
-  /* 입력 레벨 미터 — 마이크가 살아있음을 시각적으로 확인 */
   function startMeter(stream) {
     try {
       audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
@@ -242,68 +284,130 @@
       analyser.fftSize = 512;
       src.connect(analyser);
       const buf = new Uint8Array(analyser.frequencyBinCount);
-      const tick = () => {
+      (function tick() {
         analyser.getByteTimeDomainData(buf);
         let peak = 0;
-        for (let i = 0; i < buf.length; i++) peak = Math.max(peak, Math.abs(buf[i] - 128));
+        for (let i = 0; i < buf.length; i++) {
+          const d = Math.abs(buf[i] - 128);
+          if (d > peak) peak = d;
+        }
         meterBar.style.width = Math.min(100, (peak / 64) * 100) + '%';
         meterRAF = requestAnimationFrame(tick);
-      };
-      tick();
-    } catch (_) {}
+      })();
+    } catch (e) { console.warn('[meter]', e); }
   }
 
+  /* 권한 획득 이후에만 호출할 것 — 그 전에는 deviceId/label이 빈 문자열 */
   async function listDevices() {
     if (!navigator.mediaDevices?.enumerateDevices) return;
-    const devs = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'audioinput');
-    if (!devs.length) return;
-    const cur = deviceSel.value;
-    deviceSel.innerHTML = '<option value="default">기본 장치</option>';
-    devs.forEach(d => {
-      const o = document.createElement('option');
-      o.value = d.deviceId;
-      o.textContent = d.label || ('마이크 ' + d.deviceId.slice(0, 6));
-      deviceSel.appendChild(o);
-    });
-    if (cur) deviceSel.value = cur;
+    try {
+      const devs = (await navigator.mediaDevices.enumerateDevices())
+                   .filter(d => d.kind === 'audioinput' && d.deviceId && d.deviceId !== 'default');
+      const cur = deviceSel.value;
+      deviceSel.innerHTML = '<option value="default">기본 장치</option>';
+      devs.forEach((d, i) => {
+        const o = document.createElement('option');
+        o.value = d.deviceId;
+        o.textContent = d.label || ('마이크 ' + (i + 1));
+        deviceSel.appendChild(o);
+      });
+      devicesLoaded = devs.length > 0;
+      deviceSel.disabled = !devicesLoaded;
+      if (cur && [...deviceSel.options].some(o => o.value === cur)) deviceSel.value = cur;
+    } catch (e) { console.warn('[devices]', e); }
   }
 
-  grantBtn.addEventListener('click', acquireMic);
+  /* 권한 상태 구독 */
+  async function watchPermission() {
+    if (!navigator.permissions?.query) { setMicUI('off', '권한 필요 — [권한 요청] 클릭'); return; }
+    try {
+      const p = await navigator.permissions.query({ name: 'microphone' });
+      applyPerm(p.state);
+      p.onchange = () => applyPerm(p.state);
+    } catch { setMicUI('off', '권한 필요 — [권한 요청] 클릭'); }
+  }
+  function applyPerm(state) {
+    if (state === 'granted') {
+      if (!micStream && keepAliveChk.checked) acquireMic();
+      else if (micStream) setMicUI('on', '연결됨 · 상시 유지 중');
+      else setMicUI('', '허용됨 (미연결)');
+    } else if (state === 'denied') {
+      setMicUI('deny', '차단됨 — 자물쇠 아이콘 → 마이크 → 허용 후 새로고침');
+    } else {
+      setMicUI('off', '권한 필요 — [권한 요청] 클릭');
+    }
+  }
+
+  grantBtn.addEventListener('click', acquireMic);   // 반드시 사용자 클릭 안에서 호출
   releaseBtn.addEventListener('click', releaseMic);
   keepAliveChk.addEventListener('change', () => {
-    if (keepAliveChk.checked) acquireMic(); else if (!wantListening) releaseMic();
+    if (keepAliveChk.checked) acquireMic();
+    else if (!wantListening) releaseMic();
   });
   deviceSel.addEventListener('change', async () => { releaseMic(); await acquireMic(); });
-  navigator.mediaDevices?.addEventListener?.('devicechange', listDevices);
+  navigator.mediaDevices?.addEventListener?.('devicechange', () => { if (micStream) listDevices(); });
 
-  /* 탭 복귀 / 절전 해제 시 스트림·인식기 자동 복구 */
-  document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState !== 'visible') return;
-    if (keepAliveChk.checked && !micStream) acquireMic();
-    if (wantListening && !recognizing && !micPaused) safeStart();
+  /* ═══════════ 2. 진단 패널 ═══════════ */
+  diagBtn.addEventListener('click', async () => {
+    const on = diagBox.style.display === 'block';
+    if (on) { diagBox.style.display = 'none'; return; }
+    diagBox.style.display = 'block';
+    diagBox.textContent = '점검 중…';
+
+    const mark = (ok, t) => `<span class="${ok ? 'ok' : 'bad'}">${ok ? '✔' : '✘'} ${t}</span>`;
+    const lines = [];
+    lines.push('<b>환경 진단</b>');
+    lines.push(mark(window.isSecureContext, '보안 컨텍스트 (https/localhost)') + ` — ${location.protocol}//${location.host || '(file)'}`);
+    lines.push(mark(!inIframe, 'iframe 아님') + (inIframe ? ' — 부모의 allow="microphone" 필요' : ''));
+    lines.push(mark(!!navigator.mediaDevices?.getUserMedia, 'getUserMedia 사용 가능'));
+    lines.push(mark(!!SR, 'SpeechRecognition 지원'));
+    lines.push(mark(!!synth, 'speechSynthesis 지원'));
+    lines.push(mark(!!self.Translator, 'on-device Translator API') + (self.Translator ? '' : ' — 폴백 모드로 동작'));
+
+    if (navigator.permissions?.query) {
+      try {
+        const p = await navigator.permissions.query({ name: 'microphone' });
+        lines.push(`<span class="${p.state === 'granted' ? 'ok' : p.state === 'denied' ? 'bad' : 'warn'}">● 권한 상태: ${p.state}</span>`);
+      } catch { lines.push('<span class="warn">● 권한 상태: 조회 불가</span>'); }
+    }
+    lines.push(mark(!!micStream, '마이크 스트림 연결됨'));
+    if (micStream) {
+      const t = micStream.getAudioTracks()[0];
+      lines.push(`   └ 장치: ${t.label || '(이름 없음)'} / state=${t.readyState}`);
+    }
+    try {
+      const devs = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'audioinput');
+      lines.push(`● 입력 장치 ${devs.length}개` + (devs[0]?.label ? '' : ' <span class="warn">(라벨 비어있음 = 권한 미획득)</span>'));
+    } catch {}
+    lines.push(`● UA: ${navigator.userAgent.slice(0, 90)}`);
+    diagBox.innerHTML = lines.join('\n');
   });
-  window.addEventListener('focus', () => { if (audioCtx?.state === 'suspended') audioCtx.resume(); });
 
-  watchPermission();
-  if (keepAliveChk.checked && navigator.permissions === undefined) acquireMic();
-
-  /* ═══════════ 2. TTS ═══════════ */
+  /* ═══════════ 3. TTS ═══════════ */
   let voices = [], ttsActive = false;
+
   function loadVoices() {
     if (!synth) return;
-    voices = synth.getVoices().filter(v => /^en(-|_)/i.test(v.lang));
+    voices = synth.getVoices().filter(v => /^en[-_]/i.test(v.lang));
     if (!voices.length) return;
     voiceSel.innerHTML = '';
     voices.forEach((v, i) => {
       const o = document.createElement('option');
-      o.value = i; o.textContent = `${v.name} (${v.lang})${v.localService ? ' · 로컬' : ''}`;
+      o.value = i;
+      o.textContent = `${v.name} (${v.lang})${v.localService ? ' · 로컬' : ''}`;
       voiceSel.appendChild(o);
     });
     const pref = voices.findIndex(v => /en-US/i.test(v.lang));
     voiceSel.selectedIndex = pref >= 0 ? pref : 0;
   }
-  if (synth) { loadVoices(); synth.onvoiceschanged = loadVoices; }
-  else { autoSpeakChk.checked = false; autoSpeakChk.disabled = true; speakAllBtn.disabled = true; }
+  if (synth) {
+    loadVoices();
+    synth.onvoiceschanged = loadVoices;
+    setTimeout(loadVoices, 500);   // 일부 브라우저는 지연 로드
+  } else {
+    autoSpeakChk.checked = false; autoSpeakChk.disabled = true; speakAllBtn.disabled = true;
+    voiceSel.innerHTML = '<option>TTS 미지원</option>';
+  }
 
   rateEl.addEventListener('input', () => rateVal.textContent = (+rateEl.value).toFixed(1));
   pitchEl.addEventListener('input', () => pitchVal.textContent = (+pitchEl.value).toFixed(1));
@@ -312,22 +416,26 @@
     const u = new SpeechSynthesisUtterance(text);
     const v = voices[+voiceSel.value];
     if (v) { u.voice = v; u.lang = v.lang; } else u.lang = 'en-US';
-    u.rate = +rateEl.value; u.pitch = +pitchEl.value;
+    u.rate = +rateEl.value;
+    u.pitch = +pitchEl.value;
     return u;
   }
 
-  /* TTS 중에는 인식기만 끊고 스트림은 유지 → 권한 팝업 없이 즉시 복귀 */
-  function speak(text, { muteMic = true } = {}) {
-    if (!synth || !text.trim()) return;
+  function speak(text, opts) {
+    const muteMic = !opts || opts.muteMic !== false;
+    if (!synth || !text || !text.trim()) return;
     const u = makeUtterance(text);
     u.onstart = () => {
-      ttsActive = true; enOut.classList.add('speaking');
+      ttsActive = true;
+      enOut.classList.add('speaking');
       setBadge('🔊 읽는 중', false, true);
-      if (muteMic && recognizing) pauseMic();
+      if (muteMic && recognizing) pauseRecognizer();
     };
     u.onend = u.onerror = () => {
-      ttsActive = false; enOut.classList.remove('speaking'); restoreBadge();
-      if (muteMic && wantListening) resumeMic();
+      ttsActive = false;
+      enOut.classList.remove('speaking');
+      restoreBadge();
+      if (muteMic && wantListening) resumeRecognizer();
     };
     synth.speak(u);
   }
@@ -338,23 +446,29 @@
     synth.cancel();
     const chunks = enOut.value.match(/[^.!?]+[.!?]*/g) || [enOut.value];
     chunks.forEach((c, i) => {
-      const u = makeUtterance(c.trim());
+      const txt = c.trim();
+      if (!txt) return;
+      const u = makeUtterance(txt);
       if (i === 0) u.onstart = () => { enOut.classList.add('speaking'); setBadge('🔊 읽는 중', false, true); };
       if (i === chunks.length - 1) u.onend = () => { enOut.classList.remove('speaking'); restoreBadge(); };
       synth.speak(u);
     });
   });
+
   stopSpeakBtn.addEventListener('click', () => {
-    synth?.cancel(); ttsActive = false;
-    enOut.classList.remove('speaking'); restoreBadge();
-    if (wantListening) resumeMic();
+    if (synth) synth.cancel();
+    ttsActive = false;
+    enOut.classList.remove('speaking');
+    restoreBadge();
+    if (wantListening) resumeRecognizer();
   });
+
   enOut.addEventListener('dblclick', () => {
     const sel = window.getSelection().toString().trim();
     if (sel) { synth.cancel(); speak(sel, { muteMic: false }); }
   });
 
-  /* ═══════════ 3. 번역 ═══════════ */
+  /* ═══════════ 4. 번역 ═══════════ */
   let translator = null, translatorLang = null, translatorReady = false;
   let lastBadge = { t: '확인 중…', warn: true };
   const srcCode = () => langSel.options[langSel.selectedIndex].dataset.src;
@@ -362,26 +476,35 @@
   function setBadge(text, warn, transient) {
     engineBadge.textContent = text;
     engineBadge.className = 'badge' + (transient ? ' speaking' : (warn ? ' off' : ''));
-    if (!transient) lastBadge = { t: text, warn };
+    if (!transient) lastBadge = { t: text, warn: warn };
   }
   const restoreBadge = () => setBadge(lastBadge.t, lastBadge.warn);
 
   async function ensureTranslator() {
     const src = srcCode();
-    if (src === 'en') { translator=null; translatorReady=false; setBadge('번역 불필요', true); return false; }
-    if (!self.Translator) { translatorReady=false; setBadge('폴백: 영어 직접 인식', true); return false; }
+    if (src === 'en') { translator = null; translatorReady = false; setBadge('번역 불필요', true); return false; }
+    if (!self.Translator) { translatorReady = false; setBadge('폴백: 영어 직접 인식', true); return false; }
     if (translator && translatorLang === src) return true;
     try {
       setBadge('모델 준비 중…', true);
       const av = await self.Translator.availability({ sourceLanguage: src, targetLanguage: 'en' });
-      if (av === 'unavailable') { setBadge('폴백: 영어 직접 인식', true); translatorReady=false; return false; }
+      if (av === 'unavailable') { setBadge('폴백: 영어 직접 인식', true); translatorReady = false; return false; }
       translator = await self.Translator.create({
         sourceLanguage: src, targetLanguage: 'en',
-        monitor(m) { m.addEventListener('downloadprogress', e => setBadge('모델 다운로드 ' + Math.round(e.loaded*100) + '%', true)); }
+        monitor(m) {
+          m.addEventListener('downloadprogress', e =>
+            setBadge('모델 다운로드 ' + Math.round(e.loaded * 100) + '%', true));
+        }
       });
       translatorLang = src; translatorReady = true;
-      setBadge('on-device 번역', false); return true;
-    } catch (e) { translatorReady = false; setBadge('폴백: 영어 직접 인식', true); return false; }
+      setBadge('on-device 번역', false);
+      return true;
+    } catch (e) {
+      console.warn('[translator]', e);
+      translatorReady = false;
+      setBadge('폴백: 영어 직접 인식', true);
+      return false;
+    }
   }
 
   let queue = Promise.resolve();
@@ -390,54 +513,64 @@
       if (!translatorReady || !translator) return;
       try {
         const out = (await translator.translate(text)).trim();
-        enOut.value += out + ' '; enOut.scrollTop = enOut.scrollHeight;
-        enInterim.textContent = ''; autoSpeak(out);
-      } catch (_) {}
+        enOut.value += out + ' ';
+        enOut.scrollTop = enOut.scrollHeight;
+        enInterim.textContent = '';
+        autoSpeak(out);
+      } catch (e) { console.warn('[translate]', e); }
     });
   }
+
   let interimTimer = null;
   function previewTranslate(text) {
-    if (!translatorReady || !text) { enInterim.textContent=''; return; }
+    if (!translatorReady || !text) { enInterim.textContent = ''; return; }
     clearTimeout(interimTimer);
     interimTimer = setTimeout(async () => {
-      try { enInterim.textContent = await translator.translate(text); } catch(_) {}
+      try { enInterim.textContent = await translator.translate(text); } catch (e) {}
     }, 350);
   }
 
-  /* ═══════════ 4. 음성 인식 + 워치독 ═══════════ */
+  /* ═══════════ 5. 음성 인식 ═══════════ */
   let recMain = null, recEn = null;
-  let wantListening = false, recognizing = false, micPaused = false;
+  let wantListening = false, recognizing = false, recPaused = false;
   let watchdog = null, lastActivity = 0;
 
   function buildRecognizer(langCode, handlers) {
     const r = new SR();
-    r.lang = langCode; r.continuous = contChk.checked;
-    r.interimResults = true; r.maxAlternatives = 1;
+    r.lang = langCode;
+    r.continuous = contChk.checked;
+    r.interimResults = true;
+    r.maxAlternatives = 1;
     Object.assign(r, handlers);
     return r;
   }
 
-  function pauseMic() {   // 인식기만 중단, micStream 은 그대로 유지
-    micPaused = true;
+  function pauseRecognizer() {   // 인식기만 중단, micStream은 유지
+    recPaused = true;
     statusEl.textContent = '🔊 읽는 중 — 인식 일시 중지 (마이크 연결 유지)';
     statusEl.classList.remove('rec');
-    try { recMain && recMain.abort(); } catch(_) {}
-    try { recEn && recEn.abort(); } catch(_) {}
+    try { if (recMain) recMain.abort(); } catch (e) {}
+    try { if (recEn) recEn.abort(); } catch (e) {}
     recognizing = false;
   }
-  function resumeMic() {
-    if (!wantListening || !micPaused) return;
-    micPaused = false;
+  function resumeRecognizer() {
+    if (!wantListening || !recPaused) return;
+    recPaused = false;
     setTimeout(() => { if (wantListening && !ttsActive) safeStart(); }, 250);
   }
 
-  /* 중복 start() 로 InvalidStateError 나는 것을 방지 */
   function safeStart() {
-    if (recognizing) return;
-    try { startAll(); } catch (_) {}
+    if (recognizing || !SR) return;
+    try { startRecognizers(); }
+    catch (e) {
+      if (e.name !== 'InvalidStateError') {
+        statusEl.textContent = '시작 실패: ' + e.message;
+        console.error('[recognition]', e);
+      }
+    }
   }
 
-  function startAll() {
+  function startRecognizers() {
     recMain = buildRecognizer(langSel.value, {
       onstart() {
         recognizing = true; lastActivity = Date.now();
@@ -452,70 +585,84 @@
         for (let i = e.resultIndex; i < e.results.length; i++) {
           const t = e.results[i][0].transcript;
           if (e.results[i].isFinal) {
-            srcOut.value += t.trim() + ' ';
-            if (transChk.checked) enqueueTranslate(t.trim());
-            else if (srcCode() === 'en') autoSpeak(t.trim());
+            const fin = t.trim();
+            if (!fin) continue;
+            srcOut.value += fin + ' ';
+            if (transChk.checked && translatorReady) enqueueTranslate(fin);
+            else if (srcCode() === 'en') autoSpeak(fin);
           } else interim += t;
         }
-        srcInterim.textContent = interim; srcOut.scrollTop = srcOut.scrollHeight;
+        srcInterim.textContent = interim;
+        srcOut.scrollTop = srcOut.scrollHeight;
         if (transChk.checked) previewTranslate(interim);
       },
       onerror(e) {
-        if (e.error === 'aborted') return;
-        if (e.error === 'no-speech') { lastActivity = Date.now(); return; }  // 무시하고 계속
-        if (e.error === 'not-allowed') { applyPerm('denied'); wantListening = false; }
-        handleErr(e);
+        if (e.error === 'aborted' || e.error === 'no-speech') { lastActivity = Date.now(); return; }
+        if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
+          wantListening = false; applyPerm('denied');
+        }
+        handleRecErr(e);
       },
       onend() {
         recognizing = false;
-        if (micPaused) return;
-        if (wantListening) { setTimeout(safeStart, 120); return; }  // 끊기면 즉시 재기동
+        if (recPaused) return;
+        if (wantListening) { setTimeout(safeStart, 120); return; }
         finishUI();
       }
     });
     recMain.start();
 
+    // 내장 번역기가 없을 때만 en-US 인식기 병행
     if (transChk.checked && !translatorReady && srcCode() !== 'en') {
       recEn = buildRecognizer('en-US', {
         onresult(e) {
           let interim = '';
           for (let i = e.resultIndex; i < e.results.length; i++) {
             const t = e.results[i][0].transcript;
-            if (e.results[i].isFinal) { enOut.value += t.trim()+' '; enOut.scrollTop = enOut.scrollHeight; autoSpeak(t.trim()); }
-            else interim += t;
+            if (e.results[i].isFinal) {
+              const fin = t.trim();
+              if (!fin) continue;
+              enOut.value += fin + ' ';
+              enOut.scrollTop = enOut.scrollHeight;
+              autoSpeak(fin);
+            } else interim += t;
           }
           enInterim.textContent = interim;
         },
         onerror() {},
-        onend() { if (wantListening && !micPaused && contChk.checked) { try { recEn.start(); } catch(_){} } }
+        onend() {
+          if (wantListening && !recPaused && contChk.checked) { try { recEn.start(); } catch (e) {} }
+        }
       });
-      try { recEn.start(); } catch(_) {}
+      try { recEn.start(); } catch (e) { console.warn('병행 인식기 기동 실패(무시 가능)', e); }
     }
   }
 
-  /* 워치독: 인식기가 조용히 죽으면 15초 내 자동 부활 */
   function startWatchdog() {
     stopWatchdog();
     watchdog = setInterval(() => {
-      if (!wantListening || micPaused || ttsActive) return;
-      if (keepAliveChk.checked && !micStream) acquireMic();
+      if (!wantListening || recPaused || ttsActive) return;
+      if (keepAliveChk.checked && !micStream) { acquireMic(); return; }
       if (!recognizing) { safeStart(); return; }
-      if (Date.now() - lastActivity > 15000) {   // 응답 없음 → 강제 재시작
-        try { recMain.abort(); } catch(_) {}
+      if (Date.now() - lastActivity > 15000) {
+        try { recMain.abort(); } catch (e) {}
         lastActivity = Date.now();
       }
     }, 3000);
   }
-  const stopWatchdog = () => { if (watchdog) clearInterval(watchdog), watchdog = null; };
+  function stopWatchdog() { if (watchdog) { clearInterval(watchdog); watchdog = null; } }
 
-  function handleErr(e) {
-    const msg = {
-      'not-allowed': '마이크 권한이 거부되었습니다. 주소창 자물쇠 아이콘에서 "허용"으로 변경해 주세요.',
+  function handleRecErr(e) {
+    const map = {
+      'not-allowed': '마이크 권한이 거부되었습니다. 자물쇠 아이콘 → 마이크 → "허용"으로 변경하세요.',
+      'service-not-allowed': '음성 인식 서비스가 차단되었습니다.',
       'audio-capture': '마이크를 찾을 수 없습니다.',
-      'network': '네트워크 오류가 발생했습니다.'
-    }[e.error] || ('오류: ' + e.error);
-    statusEl.textContent = msg; statusEl.classList.remove('rec');
+      'network': '네트워크 오류 — 인식 서비스에 연결할 수 없습니다.'
+    };
+    statusEl.textContent = map[e.error] || ('오류: ' + e.error);
+    statusEl.classList.remove('rec');
   }
+
   function finishUI() {
     statusEl.textContent = micStream ? '대기 중 (마이크 연결 유지)' : '대기 중';
     statusEl.classList.remove('rec');
@@ -523,45 +670,64 @@
     startBtn.disabled = false; stopBtn.disabled = true;
   }
 
+  /* ═══════════ 6. UI 바인딩 ═══════════ */
   startBtn.addEventListener('click', async () => {
-    const s = await acquireMic();          // 권한 선확보 → 이후 재시작엔 팝업 없음
-    if (!s) return;
+    const s = await acquireMic();
+    if (!s) { statusEl.textContent = '마이크 연결 실패 — 상단 상태 바와 [진단]을 확인하세요.'; return; }
     if (transChk.checked) await ensureTranslator();
     wantListening = true;
-    safeStart(); startWatchdog();
+    safeStart();
+    startWatchdog();
   });
 
   stopBtn.addEventListener('click', () => {
-    wantListening = false; micPaused = false; stopWatchdog();
-    try { recMain && recMain.stop(); } catch(_) {}
-    try { recEn && recEn.stop(); } catch(_) {}
+    wantListening = false; recPaused = false;
+    stopWatchdog();
+    try { if (recMain) recMain.stop(); } catch (e) {}
+    try { if (recEn) recEn.stop(); } catch (e) {}
     recEn = null;
     finishUI();
-    // keepAlive 가 켜져 있으면 스트림은 의도적으로 닫지 않음
     if (!keepAliveChk.checked) releaseMic();
   });
 
   clearBtn.addEventListener('click', () => {
-    srcOut.value=''; enOut.value=''; srcInterim.textContent=''; enInterim.textContent='';
+    srcOut.value = ''; enOut.value = '';
+    srcInterim.textContent = ''; enInterim.textContent = '';
   });
+
   $('copySrc').addEventListener('click', () => copy(srcOut, $('copySrc')));
   $('copyEn').addEventListener('click', () => copy(enOut, $('copyEn')));
   async function copy(el, btn) {
     if (!el.value) return;
     try { await navigator.clipboard.writeText(el.value); }
-    catch(_) { el.select(); document.execCommand('copy'); }
-    const old = btn.textContent; btn.textContent='복사됨'; setTimeout(()=>btn.textContent=old,1200);
+    catch (e) { el.select(); document.execCommand('copy'); }
+    const old = btn.textContent;
+    btn.textContent = '복사됨';
+    setTimeout(() => { btn.textContent = old; }, 1200);
   }
 
   [langSel, contChk, transChk].forEach(el => el.addEventListener('change', async () => {
     const running = wantListening;
-    if (running) { wantListening = false; try { recMain?.stop(); recEn?.stop(); } catch(_) {} recEn = null; }
+    if (running) {
+      wantListening = false;
+      try { if (recMain) recMain.stop(); if (recEn) recEn.stop(); } catch (e) {}
+      recEn = null;
+    }
     translator = null; translatorLang = null;
     if (transChk.checked) await ensureTranslator();
-    if (running) { wantListening = true; setTimeout(safeStart, 300); }   // 스트림 유지 → 팝업 없이 재개
+    if (running) { wantListening = true; setTimeout(safeStart, 300); }
   }));
 
-  window.addEventListener('beforeunload', () => { synth?.cancel(); stopWatchdog(); });
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState !== 'visible') return;
+    if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+    if (keepAliveChk.checked && !micStream) acquireMic();
+    if (wantListening && !recognizing && !recPaused) safeStart();
+  });
+
+  window.addEventListener('beforeunload', () => { if (synth) synth.cancel(); stopWatchdog(); });
+
+  /* 초기화 */
+  watchPermission();
   ensureTranslator();
 })();
-</script>
